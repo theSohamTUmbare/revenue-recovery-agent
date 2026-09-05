@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import sys
 from datetime import UTC, datetime
@@ -71,11 +72,24 @@ def cmd_demo(args: argparse.Namespace) -> int:
         f"{summary['n_disputes']} disputes, {summary['n_with_promise']} promises to pay"
     )
 
-    reasoner = build_reasoner(now=NOW)
-    print(f"  reasoner         {reasoner.name}")
-    if reasoner.name == "deterministic-fallback":
-        print("                   (no GEMINI_API_KEY or ANTHROPIC_API_KEY found;")
-        print("                    running the deterministic control arm)")
+    # The demo defaults to the deterministic arm even when a key is present.
+    # It is the "show me this works" command, and a 400-case LLM run against a
+    # free-tier quota takes ~40 minutes -- which is not a demo, it is a wait.
+    # --llm opts in explicitly.
+    if args.llm:
+        reasoner = build_reasoner(now=NOW)
+        if reasoner.name == "deterministic-fallback":
+            print("  reasoner         deterministic rules")
+            print("                   (--llm was passed but no provider key was found)")
+        else:
+            rpm = float(os.environ.get("RRE_LLM_RPM", "10"))
+            eta_min = args.n / max(1.0, rpm)
+            print(f"  reasoner         {getattr(reasoner, 'model', 'llm')}")
+            print(f"                   ~{eta_min:.0f} min for {args.n} cases at {rpm:.0f} req/min")
+            print("                   (drop --llm for the instant deterministic run)")
+    else:
+        reasoner = OfflineReasoner(now=NOW)
+        print("  reasoner         deterministic rules  (pass --llm to use a model)")
     print()
 
     REPORTS.mkdir(exist_ok=True)
@@ -391,6 +405,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--progress", action="store_true")
+    p.add_argument(
+        "--llm", action="store_true",
+        help="use a model for diagnosis instead of the deterministic rules "
+             "(slow on a free-tier key; see the printed ETA)",
+    )
     p.set_defaults(func=cmd_demo)
 
     p = sub.add_parser("ablation", help="LLM vs deterministic rules")
@@ -418,6 +437,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-n", type=int, default=400)
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--progress", action="store_true")
+    p.add_argument("--llm", action="store_true")
+    p.add_argument("--workers", type=int, default=8)
     p.set_defaults(func=cmd_report)
 
     args = parser.parse_args(argv)

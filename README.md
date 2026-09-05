@@ -17,13 +17,23 @@ contacts instead of 400, and zero prohibited ones.
 ```bash
 git clone https://github.com/theSohamTUmbare/revenue-recovery-agent
 cd revenue-recovery-agent
-make demo
+PYTHONPATH=src python -m rre demo
 ```
 
-No API key. No install. No network. Runs on a bare Python 3.11 in about two
-seconds and prints the full benchmark. Set `GEMINI_API_KEY` (or
-`ANTHROPIC_API_KEY`) and the same command runs diagnosis through a model
-instead — see [Running with and without a key](#running-with-and-without-a-key).
+Windows PowerShell:
+
+```powershell
+$env:PYTHONPATH="src"; python -m rre demo
+```
+
+No API key. No install. No network. No dependencies. Runs on a bare Python 3.11
+in about half a second and prints the full benchmark. (`make demo` does the same
+if you have `make`; every target is a thin wrapper over `python -m rre`, because
+`make` is not a safe assumption on Windows.)
+
+Add `--llm` with a `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` set to run diagnosis
+through a model instead — see
+[Running with and without a key](#running-with-and-without-a-key).
 
 ---
 
@@ -276,9 +286,14 @@ Run `make audit` to see real entries from both halves.
 
 | | Reasoner | What runs |
 |---|---|---|
-| `make demo` | deterministic rules | Everything. Full benchmark, all metrics, HTML report. |
-| `GEMINI_API_KEY=... make demo` | Gemini (`gemini-3.5-flash-lite`) | Same, with model diagnosis |
-| `ANTHROPIC_API_KEY=... make demo` | Claude (`claude-opus-5`) | Same, via the Anthropic path |
+| `python -m rre demo` | deterministic rules | Everything. Full benchmark, all metrics, HTML report, in ~0.5s. |
+| `python -m rre demo --llm` + `GEMINI_API_KEY` | Gemini (`gemini-3.5-flash-lite`) | Same, with model diagnosis |
+| `python -m rre demo --llm` + `ANTHROPIC_API_KEY` | Claude (`claude-opus-5`) | Same, via the Anthropic path |
+
+**The model is opt-in, not automatic.** `demo` runs the deterministic arm even
+when a key is present. A 400-case run against a free-tier quota takes about 40
+minutes, which is not a demo, it is a wait — so `--llm` asks for it explicitly
+and prints the ETA before starting.
 
 Two providers sit behind one `Reasoner` protocol. Adding the second one required
 edits to exactly one class — the policy gate, playbook, audit trail and scoring
@@ -368,11 +383,16 @@ tests/
   test_policy.py  one test per guardrail obligation
 ```
 
+All commands assume `PYTHONPATH=src` (or `$env:PYTHONPATH="src"` in PowerShell).
+
 ```bash
-make demo               # full benchmark + HTML report
-make test               # 27 tests
-make ablation LLM=1     # does the LLM earn its place on root cause?
-make freetext LLM=1     # ...and on customer prose, where the rules can't cheat
-make sensitivity        # does the conclusion survive a shaken table?
-make audit              # sample audit entries, including refusals
+python -m rre demo                  # full benchmark + HTML report  (~0.5s)
+python -m rre demo --llm --progress # same, with model diagnosis    (slow, see ETA)
+python -m pytest tests/ -q          # 27 tests
+python -m rre freetext --llm        # LLM vs rules on customer prose  (15 calls)
+python -m rre ablation --llm -n 120 # LLM vs rules on root cause      (120 calls)
+python -m rre sensitivity           # survive a +/-30% shaken table
+python -m rre audit                 # sample audit entries, incl. refusals
 ```
+
+`make demo`, `make test`, `make freetext LLM=1` etc. wrap the same commands.
