@@ -74,7 +74,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
     reasoner = build_reasoner(now=NOW)
     print(f"  reasoner         {reasoner.name}")
     if reasoner.name == "deterministic-fallback":
-        print("                   (no ANTHROPIC_API_KEY found - running control arm)")
+        print("                   (no GEMINI_API_KEY or ANTHROPIC_API_KEY found;")
+        print("                    running the deterministic control arm)")
     print()
 
     REPORTS.mkdir(exist_ok=True)
