@@ -173,7 +173,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
     if len(exceptions) > 12:
         print(f"  ... and {len(exceptions) - 12} more (full list in the HTML report)")
 
-    if result.llm_usage:
+    if result.llm_usage and result.reasoner_name == "llm":
         print()
         print(_rule("="))
         print("  WHAT THE AI COST")

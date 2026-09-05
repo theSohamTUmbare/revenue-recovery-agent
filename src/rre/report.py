@@ -167,7 +167,9 @@ def write_html(
     ) or "<tr><td colspan='2'>none</td></tr>"
 
     usage = ""
-    if result.llm_usage:
+    # Only meaningful when an LLM actually ran. On the control arm there is no
+    # AI cost to report, and printing a zeroed panel would imply otherwise.
+    if result.llm_usage and result.reasoner_name == "llm":
         u = result.llm_usage
         usage = f"""
         <h2>What the AI cost <span class="n">token accounting</span></h2>
