@@ -306,6 +306,41 @@ def cmd_sensitivity(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_freetext(args: argparse.Namespace) -> int:
+    """The fair fight: prose extraction, where the rules have no insider edge."""
+    from .freetext_eval import check_coverage, evaluate, rows
+
+    check_coverage()
+    print()
+    print(_rule("="))
+    print("  FREE-TEXT EXTRACTION - the one comparison the rules cannot rig")
+    print(_rule("="))
+    print("  The root-cause ablation is confounded: OfflineReasoner._classify is")
+    print("  nearly the inverse of the generator that produced the data, and the")
+    print("  same person wrote both. On customer prose it has no such advantage --")
+    print("  the regexes are an honest guess at what people write.")
+    print()
+    print("  Missing an opt-out means messaging someone who said stop. That column")
+    print("  matters more than any accuracy figure in this project.")
+    print()
+
+    scores = [evaluate(OfflineReasoner(now=NOW))]
+    if args.llm:
+        scores.append(evaluate(build_reasoner(now=NOW)))
+    else:
+        print("  (pass --llm with a provider key to include the model arm)")
+
+    print(_table(rows(scores), ["reasoner", "intent", "promise date", "opt-out/dispute recall", "errors"]))
+    for s in scores:
+        if s.misses:
+            print()
+            print(f"  {s.reasoner} missed these safety-critical intents:")
+            for m in s.misses:
+                print(f"      {m}")
+    print()
+    return 0
+
+
 def cmd_audit(args: argparse.Namespace) -> int:
     """Show what the audit trail actually records, including the refusals."""
     import json
@@ -369,6 +404,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--trials", type=int, default=10)
     p.set_defaults(func=cmd_sensitivity)
+
+    p = sub.add_parser("freetext", help="intent extraction from customer prose")
+    p.add_argument("--llm", action="store_true", help="include the model arm")
+    p.set_defaults(func=cmd_freetext)
 
     p = sub.add_parser("audit", help="inspect the audit trail")
     p.add_argument("-n", type=int, default=2, help="samples per section")

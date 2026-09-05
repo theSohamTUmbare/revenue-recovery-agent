@@ -20,9 +20,9 @@ make demo
 ```
 
 No API key. No install. No network. Runs on a bare Python 3.11 in about two
-seconds and prints the full benchmark. (With `ANTHROPIC_API_KEY` set it uses
-Claude for diagnosis instead of the fallback reasoner — see
-[Running with and without a key](#running-with-and-without-a-key).)
+seconds and prints the full benchmark. Set `GEMINI_API_KEY` (or
+`ANTHROPIC_API_KEY`) and the same command runs diagnosis through a model
+instead — see [Running with and without a key](#running-with-and-without-a-key).
 
 ---
 
@@ -78,7 +78,7 @@ sender. The full mapping from each violation to the obligation it breaches is in
                     └────────────────────┬─────────────────────┘
                                          │
                          ┌───────────────▼───────────────┐
-                         │  DIAGNOSE          (Claude)   │   parallel
+                         │  DIAGNOSE             (LLM)   │   parallel
                          │  which of 8 root causes?      │   stateless
                          │  + parse Hinglish replies     │
                          └───────────────┬───────────────┘
@@ -136,8 +136,9 @@ The split follows from what kind of question each one is:
 
 | Question | Answered by | Why |
 |---|---|---|
-| *"bhai salary 5 tarikh ko aayegi, tab kar dunga"* — is that a payment promise, and for when? | **Claude** | Genuinely ambiguous natural language, code-mixed, no regex survives contact with it |
-| Does `do_not_honour` here mean risk, or an empty account? | **Claude** | Requires weighing several weak signals against each other |
+| *"bhai salary 5 tarikh ko aayegi, tab kar dunga"* — is that a payment promise, and for when? | **LLM** | Code-mixed prose. Measured: 100% vs 80% for regex, and the regex missed a dispute outright |
+| *"Why do you keep messaging me? I paid this last week."* — should we contact them again? | **LLM** | No keyword fires, yet the intent is unmistakable. This is the miss that matters |
+| Does `do_not_honour` here mean risk, or an empty account? | **Undecided — see below** | We expected the model to win here. On our benchmark it doesn't, and our benchmark is confounded, so we claim nothing |
 | May we message this person a third time this week? | **Plain code** | Has a correct answer that must not vary with temperature, prompt wording, or model version |
 | Is retrying an expired card worth it? | **Plain code** | Settled domain knowledge, belongs in a table you can diff |
 | What text does the customer receive? | **Templates** | Real copy about real money — compliance should review it in advance, and it must not hallucinate an amount |
@@ -146,9 +147,54 @@ The customer-facing message is templated, not generated. It's the one thing in
 the system a real person actually reads, and "the model usually gets it right"
 is not a standard you can hold copy about someone's debt to.
 
-**Does the LLM earn its place at all?** `make ablation` runs the identical batch
-through both reasoners and diffs them. If the gap were nil, the honest move
-would be deleting the LLM — which is the point of measuring instead of assuming.
+### Does the LLM earn its place? We measured, and the first answer was no
+
+`make ablation` runs the identical batch through both reasoners. On root-cause
+classification, **the deterministic rules beat the model**:
+
+| Reasoner | Answered | Root-cause accuracy |
+|---|---|---|
+| deterministic rules | 120/120 | **87.5%** |
+| Gemini 3.5 Flash Lite | 107/120 | 70.1% |
+
+Taken at face value, that says delete the LLM.
+
+**Taken at face value it would be wrong, and the fault is ours.**
+`OfflineReasoner._classify` is very nearly the *inverse* of
+`generate._pick_case_shape`. The generator picks a root cause and then samples a
+symptom conditional on it; the rules invert that exact mapping. The same person
+wrote both, one after the other. That isn't a baseline — it's the answer key
+with extra steps, and no rules engine meeting real traffic would have it.
+
+So the root-cause ablation measures our benchmark, not the world. We're
+reporting the 87.5% rather than quietly dropping a comparison that embarrasses
+the model, but we're not claiming we earned it.
+
+### The comparison the rules can't rig
+
+`make freetext` scores the one sub-problem where the regexes have no insider
+knowledge: reading what a customer actually wrote. Nothing about the phrasing
+was reverse-engineered into them.
+
+| Reasoner | Intent | Promise date | **Opt-out / dispute recall** |
+|---|---:|---:|---:|
+| deterministic rules | 47% | 80% | **80%** (4/5) |
+| Gemini 3.5 Flash Lite | **87%** | **100%** | **100%** (5/5) |
+
+The rules missed this one:
+
+> *"Why do you keep messaging me? I paid this last week."*
+
+No keyword fires. No "stop", no "unsubscribe". It is unmistakably someone
+telling you to leave them alone, and the regex sees nothing — so the pipeline
+would have messaged them again. That single miss is worth more than the 17-point
+root-cause gap, because the root-cause gap is an artefact and this one isn't.
+
+**The honest conclusion:** the LLM's measured value here is *reading prose* —
+intent and commitments buried in code-mixed Hinglish — not classifying
+structured telemetry. On telemetry we have no valid evidence either way, and we
+are not going to manufacture some by tuning against a generator we wrote. The
+next step is a real dataset, not more synthetic hill-climbing.
 
 ---
 
@@ -230,19 +276,34 @@ Run `make audit` to see real entries from both halves.
 | | Reasoner | What runs |
 |---|---|---|
 | `make demo` | deterministic rules | Everything. Full benchmark, all metrics, HTML report. |
-| `ANTHROPIC_API_KEY=... make demo` | Claude (`claude-opus-5`) | Same, with LLM diagnosis |
+| `GEMINI_API_KEY=... make demo` | Gemini (`gemini-3.5-flash-lite`) | Same, with model diagnosis |
+| `ANTHROPIC_API_KEY=... make demo` | Claude (`claude-opus-5`) | Same, via the Anthropic path |
+
+Two providers sit behind one `Reasoner` protocol. Adding the second one required
+edits to exactly one class — the policy gate, playbook, audit trail and scoring
+never learned a provider existed. That was the test of whether the seam was real
+rather than decorative.
+
+**The Anthropic path is written but unverified.** No key was available on the
+machine this was built on, so every number in this README comes from either the
+deterministic arm or Gemini. The Claude code is written against current API docs
+and is structurally identical to the working Gemini path, but *written* and
+*verified* are different claims and we are only making the first.
 
 The fallback isn't a stub — it's a real attempt at the problem using the same
 telemetry the prompt gives Claude, and it's the control arm the ablation
 measures against. It exists so a reviewer is never blocked on a key, and so the
 question *"would a lookup table have done?"* has an actual answer.
 
-Cost note: the LLM path makes one call per case. The system prompt is identical
-across the batch and marked `cache_control`, so after the first call it's served
-from cache; diagnosis runs at `effort: "low"` because it's a bounded
-classification over structured evidence, not open-ended reasoning. Both choices
-are visible in [`llm.py`](src/rre/llm.py) and the token accounting is printed
-next to the money recovered.
+Cost and quota notes, both learned the hard way:
+
+- One call per case, `temperature=0` — diagnosis has a correct answer, and a run
+  whose numbers move between invocations can't be checked by a reviewer.
+- A **token-bucket rate limiter** sits below the thread pool (`RRE_LLM_RPM`,
+  default 10) with jittered exponential backoff on 429s. Without it, eight
+  workers drain a per-minute free-tier quota in about three seconds.
+- Token accounting is printed next to the money recovered, so the trade is
+  visible rather than assumed.
 
 ---
 
