@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rre"
+version = "0.1.0"
+description = "A bounded, auditable revenue recovery agent that refuses to harass."
+readme = "README.md"
+requires-python = ">=3.11"
+# The core has no runtime dependencies on purpose: `python -m rre demo` works on
+# a bare interpreter. The LLM path is the only thing that needs a package, and
+# it is optional so a reviewer is never blocked on an install or an API key.
+dependencies = []
+
+[project.optional-dependencies]
+llm = ["anthropic>=0.40"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+rre = "rre.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 92
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
