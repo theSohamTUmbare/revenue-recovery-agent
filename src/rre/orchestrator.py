@@ -49,6 +49,8 @@ class RunResult:
     reasoner_name: str
     diagnosis_correct: int = 0
     diagnosis_total: int = 0
+    #: Cases the reasoner could not answer at all. Never silently zero.
+    undiagnosed: int = 0
     llm_usage: dict[str, int] = field(default_factory=dict)
 
 
@@ -98,8 +100,16 @@ def run_agent(
             if progress and done % 25 == 0:
                 print(f"  diagnosed {done}/{len(cases)}", flush=True)
 
+    # Accuracy is computed over cases the reasoner actually answered. Cases it
+    # could not answer are reported separately rather than folded in as errors,
+    # because an unreachable provider is an absence of measurement, not a wrong
+    # measurement.
+    answered = [
+        c for c in cases if diagnoses[c.signal.case_id].root_cause is not None
+    ]
+    undiagnosed = len(cases) - len(answered)
     correct = sum(
-        1 for c in cases if diagnoses[c.signal.case_id].root_cause == c.true_root_cause
+        1 for c in answered if diagnoses[c.signal.case_id].root_cause == c.true_root_cause
     )
 
     # -- Stage 2: decide and act, in a fixed order ----------------------
@@ -183,6 +193,7 @@ def run_agent(
         policy_rule_fires=engine.snapshot(),
         reasoner_name=reasoner.name,
         diagnosis_correct=correct,
-        diagnosis_total=len(cases),
+        diagnosis_total=len(answered),
+        undiagnosed=undiagnosed,
         llm_usage=usage,
     )

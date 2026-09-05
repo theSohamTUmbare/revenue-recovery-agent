@@ -85,6 +85,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
         seed=args.seed,
         audit_path=REPORTS / "audit.jsonl",
         progress=args.progress,
+        max_workers=getattr(args, "workers", 8),
     )
 
     agent = score_agent(cases)
@@ -126,7 +127,19 @@ def cmd_demo(args: argparse.Namespace) -> int:
     print("  DIAGNOSIS QUALITY  (vs held-out ground truth)")
     print(_rule("="))
     acc = result.diagnosis_correct / max(1, result.diagnosis_total)
-    print(f"  overall accuracy   {acc:.1%}  ({result.diagnosis_correct}/{result.diagnosis_total})")
+    print(f"  overall accuracy   {acc:.1%}  ({result.diagnosis_correct}/{result.diagnosis_total} answered)")
+    if result.undiagnosed:
+        pct = result.undiagnosed / max(1, len(cases))
+        print()
+        print(f"  !! {result.undiagnosed} of {len(cases)} cases ({pct:.0%}) could NOT be diagnosed.")
+        print("     The reasoner was unreachable or returned unparseable output for these.")
+        print("     They are EXCLUDED from the accuracy above and were escalated to a human,")
+        print("     which is the designed behaviour. The accuracy figure describes only the")
+        print(f"     {result.diagnosis_total} cases that got a real answer.")
+        if pct > 0.10:
+            print()
+            print("     >> A run with this many failures is not a valid measurement.")
+            print("     >> Lower RRE_LLM_RPM or use --limit to stay inside quota.")
     print()
     metrics, confusions = diagnosis_report(cases)
     print(
@@ -214,26 +227,32 @@ def cmd_ablation(args: argparse.Namespace) -> int:
     rows = []
     for name, reasoner in (
         ("deterministic rules", OfflineReasoner(now=NOW)),
-        ("claude", build_reasoner("anthropic", now=NOW) if args.llm else None),
+        ("llm", build_reasoner(now=NOW) if args.llm else None),
     ):
         if reasoner is None:
-            print("  (skipping the LLM arm; pass --llm and set ANTHROPIC_API_KEY)")
+            print("  (skipping the LLM arm; pass --llm with a provider key set)")
             continue
         cases = generate(args.n, seed=args.seed, now=NOW)
-        result = run_agent(cases, reasoner=reasoner, now=NOW, seed=args.seed)
+        result = run_agent(
+            cases, reasoner=reasoner, now=NOW, seed=args.seed,
+            max_workers=getattr(args, "workers", 4), progress=True,
+        )
         agent = score_agent(cases)
         acc = result.diagnosis_correct / max(1, result.diagnosis_total)
         rows.append(
             {
                 "reasoner": name,
+                "answered": f"{result.diagnosis_total}/{len(cases)}",
                 "accuracy": f"{acc:.1%}",
                 "net": fmt_inr(agent.net_paise),
                 "recovered": f"{agent.n_recovered}/{agent.n_recoverable}",
                 "contacts": str(agent.contacts_made),
             }
         )
+        if result.undiagnosed:
+            print(f"  ({name}: {result.undiagnosed} cases undiagnosed, excluded from accuracy)")
 
-    print(_table(rows, ["reasoner", "accuracy", "net", "recovered", "contacts"]))
+    print(_table(rows, ["reasoner", "answered", "accuracy", "net", "recovered", "contacts"]))
     print()
     print("  If these two rows are identical, the LLM is decoration and should be")
     print("  removed. The gap is the honest measure of what it contributes.")
@@ -330,6 +349,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("demo", help="run the full benchmark")
     p.add_argument("-n", type=int, default=400, help="batch size")
+    p.add_argument(
+        "--workers", type=int, default=8,
+        help="diagnosis concurrency; lower it on a rate-limited free-tier key",
+    )
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--progress", action="store_true")
     p.set_defaults(func=cmd_demo)
@@ -337,7 +360,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("ablation", help="LLM vs deterministic rules")
     p.add_argument("-n", type=int, default=400)
     p.add_argument("--seed", type=int, default=7)
-    p.add_argument("--llm", action="store_true", help="include the Claude arm")
+    p.add_argument("--llm", action="store_true", help="include the LLM arm")
+    p.add_argument("--workers", type=int, default=4)
     p.set_defaults(func=cmd_ablation)
 
     p = sub.add_parser("sensitivity", help="perturb the outcome table")

@@ -43,6 +43,16 @@ def choose(
     """
     cause = diagnosis.root_cause
 
+    if cause is None:
+        # The reasoner produced nothing. There is no playbook entry for "we do
+        # not know", and inventing one is how automated systems act on absence
+        # of evidence. A person looks at it.
+        return (
+            Intervention.ESCALATE_HUMAN,
+            None,
+            "diagnosis unavailable; no automated action is defensible without one",
+        )
+
     match cause:
         case RootCause.TRANSIENT_ISSUER_OUTAGE:
             # Issuer outages resolve on their own. Retrying into a down bank

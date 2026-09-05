@@ -27,9 +27,13 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Protocol
 
 from .domain import RootCause
@@ -120,12 +124,51 @@ DIAGNOSIS_SCHEMA: dict[str, Any] = {
 
 @dataclass(frozen=True, slots=True)
 class ReasonerResult:
-    root_cause: RootCause
+    #: ``None`` means the reasoner could not produce an answer at all -- the
+    #: provider was unreachable, or its output did not parse. This is
+    #: deliberately distinct from a low-confidence guess: a guess is a
+    #: measurement, an outage is not, and conflating them once already produced
+    #: a fabricated accuracy figure in this project's own history. Cases with a
+    #: ``None`` cause are excluded from every accuracy metric and counted
+    #: separately.
+    root_cause: RootCause | None
     confidence: float
     reasoning: str
     source: str
     promise_to_pay_date: datetime | None = None
     customer_intent: str | None = None
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """429s and 5xx are worth another go; a 400 never is."""
+    text = f"{type(exc).__name__}: {exc}"
+    return any(
+        marker in text
+        for marker in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "500", "504", "Timeout")
+    )
+
+
+class RateLimiter:
+    """Thread-safe token bucket, because free-tier quota is per minute.
+
+    The batch fans out across a thread pool, so throttling has to live below the
+    workers rather than between them. Without this the pool empties its whole
+    quota in the first three seconds and every remaining call 429s -- which is
+    exactly what happened on the first real run.
+    """
+
+    def __init__(self, requests_per_minute: float) -> None:
+        self._min_interval = 60.0 / max(1e-6, requests_per_minute)
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            wait = max(0.0, self._next_slot - now)
+            self._next_slot = max(now, self._next_slot) + self._min_interval
+        if wait > 0:
+            time.sleep(wait)
 
 
 class Reasoner(Protocol):
@@ -233,6 +276,164 @@ def _parse_iso_date(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value).replace(tzinfo=UTC)
     except ValueError:
         return None
+
+
+# Gemini's schema dialect is OpenAPI-flavoured (uppercase type names, `nullable`
+# instead of a union type), so the same contract is expressed twice rather than
+# shared. Keeping them side by side makes the difference visible instead of
+# hiding it behind a converter.
+GEMINI_SCHEMA: dict[str, Any] = {
+    "type": "OBJECT",
+    "properties": {
+        "root_cause": {"type": "STRING", "enum": [str(c) for c in RootCause]},
+        "confidence": {"type": "NUMBER"},
+        "reasoning": {"type": "STRING"},
+        "promise_to_pay_date": {"type": "STRING", "nullable": True},
+        "customer_intent": {
+            "type": "STRING",
+            "nullable": True,
+            "enum": ["opt_out", "dispute", "broken_instrument", "will_pay"],
+        },
+    },
+    "required": ["root_cause", "confidence", "reasoning"],
+}
+
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+
+
+class GeminiReasoner:
+    """Google Gemini behind the same protocol.
+
+    A second provider is here to prove the seam is real. The reasoner is the
+    only component in the system that talks to a model, so swapping providers
+    should touch exactly one class and change no behaviour anywhere else -- the
+    policy gate, the playbook, the audit trail and the scoring are all
+    provider-agnostic by construction. If adding this had required edits
+    elsewhere, the separation this project claims would have been fictional.
+
+    Temperature is pinned to 0. Diagnosis is a classification with a correct
+    answer, not a creative task, and a run whose numbers move between
+    invocations cannot be checked by a reviewer.
+    """
+
+    name = "llm"
+
+    def __init__(
+        self,
+        model: str | None = None,
+        now: datetime | None = None,
+        api_key: str | None = None,
+    ) -> None:
+        try:
+            from google import genai  # noqa: PLC0415
+        except ImportError as exc:  # pragma: no cover - depends on env
+            raise RuntimeError(
+                "The google-genai SDK is not installed. Either "
+                "`pip install google-genai` or run with RRE_LLM_PROVIDER=offline."
+            ) from exc
+
+        key = api_key or os.environ.get("GEMINI_API_KEY")
+        if not key:
+            raise RuntimeError("GEMINI_API_KEY is not set.")
+
+        self._genai = genai
+        self._client = genai.Client(api_key=key)
+        self.model = model or os.environ.get("RRE_LLM_MODEL", DEFAULT_GEMINI_MODEL)
+        self._now = now or datetime.now(UTC)
+        # Free-tier quota is the binding constraint, not latency. Default is
+        # deliberately conservative; raise RRE_LLM_RPM on a paid key.
+        self._limiter = RateLimiter(float(os.environ.get("RRE_LLM_RPM", "10")))
+        self.max_retries = int(os.environ.get("RRE_LLM_RETRIES", "4"))
+        self.base_backoff = float(os.environ.get("RRE_LLM_BACKOFF", "4.0"))
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cache_read_tokens = 0
+        self.calls = 0
+        self.failures = 0
+        self.last_error = ""
+
+    def diagnose(self, evidence: dict[str, Any]) -> ReasonerResult:
+        from google.genai import types  # noqa: PLC0415
+
+        response = None
+        last_error = ""
+        for attempt in range(self.max_retries + 1):
+            self._limiter.acquire()
+            try:
+                response = self._client.models.generate_content(
+                    model=self.model,
+                    contents=(
+                        f"Today is {self._now.date().isoformat()}.\n\n"
+                        f"Evidence:\n{json.dumps(evidence, indent=2)}"
+                    ),
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT,
+                        response_mime_type="application/json",
+                        response_schema=GEMINI_SCHEMA,
+                        temperature=0,
+                    ),
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 - provider errors are opaque
+                last_error = f"{type(exc).__name__}: {exc}"
+                if attempt == self.max_retries or not _is_retryable(exc):
+                    break
+                # Exponential backoff with jitter. Free-tier quota is per
+                # minute, so the sleeps are long enough to actually clear it
+                # rather than hammering a closed door.
+                delay = min(60.0, self.base_backoff * (2**attempt))
+                time.sleep(delay * (0.5 + random.random()))
+
+        if response is None:
+            # A provider failure must never become a confident answer.
+            #
+            # The first version of this method returned HARD_DECLINE here. When
+            # the quota ran out mid-batch, 384 failed calls entered the
+            # confusion matrix as real predictions and the run cheerfully
+            # reported "11.2% accuracy" -- a measurement of nothing. An
+            # unreachable model is an absence of evidence, not evidence.
+            #
+            # It now returns UNDIAGNOSED, which is excluded from every accuracy
+            # figure and counted separately, and which the confidence floor
+            # routes to a human exactly as it would a genuine "I don't know".
+            self.failures += 1
+            self.last_error = last_error
+            return ReasonerResult(
+                root_cause=None,
+                confidence=0.0,
+                reasoning=f"reasoner unavailable ({last_error[:120]}); routed to a human",
+                source="llm-error",
+            )
+
+        self.calls += 1
+        usage = getattr(response, "usage_metadata", None)
+        if usage is not None:
+            self.input_tokens += getattr(usage, "prompt_token_count", 0) or 0
+            self.output_tokens += getattr(usage, "candidates_token_count", 0) or 0
+            self.cache_read_tokens += getattr(usage, "cached_content_token_count", 0) or 0
+
+        try:
+            data = json.loads(response.text)
+            cause = RootCause(data["root_cause"])
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            # Same reasoning as above: an unparseable answer is not an answer.
+            self.failures += 1
+            return ReasonerResult(
+                root_cause=None,
+                confidence=0.0,
+                reasoning="unparseable reasoner output; routed to a human",
+                source="llm-error",
+            )
+
+        intent = data.get("customer_intent")
+        return ReasonerResult(
+            root_cause=cause,
+            confidence=max(0.0, min(1.0, float(data.get("confidence", 0.0)))),
+            reasoning=str(data.get("reasoning", ""))[:400],
+            source="llm",
+            promise_to_pay_date=_parse_iso_date(data.get("promise_to_pay_date")),
+            customer_intent=intent if isinstance(intent, str) else None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -377,18 +578,44 @@ def build_reasoner(
     rather than quietly degrading -- a run whose provenance is unclear is worse
     than a run that failed.
     """
+    load_dotenv()
     provider = provider or os.environ.get("RRE_LLM_PROVIDER", "auto")
 
     if provider == "offline":
         return OfflineReasoner(now=now)
-
     if provider == "anthropic":
         return AnthropicReasoner(now=now)
+    if provider == "gemini":
+        return GeminiReasoner(now=now)
 
-    # auto: use the LLM when a key is present, otherwise the control arm.
+    # auto: use whichever provider has a key, otherwise the control arm.
+    if os.environ.get("GEMINI_API_KEY"):
+        try:
+            return GeminiReasoner(now=now)
+        except RuntimeError:
+            pass
     if os.environ.get("ANTHROPIC_API_KEY"):
         try:
             return AnthropicReasoner(now=now)
         except RuntimeError:
             pass
     return OfflineReasoner(now=now)
+
+
+def load_dotenv(path: str = ".env") -> None:
+    """Minimal .env loader.
+
+    Hand-rolled rather than pulled in as a dependency, to keep the promise that
+    the core runs on a bare interpreter. Existing environment variables always
+    win, so an explicitly exported key is never silently overridden by a stale
+    file on disk.
+    """
+    p = Path(path)
+    if not p.exists():
+        return
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))

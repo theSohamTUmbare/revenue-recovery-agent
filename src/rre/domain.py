@@ -188,7 +188,10 @@ class Signal:
 
 @dataclass(frozen=True, slots=True)
 class Diagnosis:
-    root_cause: RootCause
+    #: ``None`` when the reasoner could not answer at all (provider unreachable,
+    #: output unparseable). Distinct from a low-confidence guess: excluded from
+    #: accuracy metrics rather than scored as a wrong prediction.
+    root_cause: RootCause | None
     confidence: float
     reasoning: str
     #: "llm" or "deterministic-fallback" -- recorded so a reader can always tell

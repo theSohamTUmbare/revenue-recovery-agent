@@ -199,6 +199,10 @@ def diagnosis_report(cases: list[Case]) -> tuple[list[ClassMetric], list[tuple[s
     for case in cases:
         if not case.decisions:
             continue
+        if case.decisions[0].diagnosis.root_cause is None:
+            # No answer is not a wrong answer. Counting outages as predictions
+            # once produced a fabricated accuracy figure here; see llm.py.
+            continue
         truth = str(case.true_root_cause)
         pred = str(case.decisions[0].diagnosis.root_cause)
         support[truth] += 1
