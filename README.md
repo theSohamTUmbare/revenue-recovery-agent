@@ -15,7 +15,8 @@ over the retry loop most merchants run today** — while making 66 customer
 contacts instead of 400, and zero prohibited ones.
 
 ```bash
-git clone <this repo> && cd <this repo>
+git clone https://github.com/theSohamTUmbare/revenue-recovery-agent
+cd revenue-recovery-agent
 make demo
 ```
 
@@ -359,6 +360,7 @@ src/rre/
   baselines.py    naive retry + blast everyone
   metrics.py      money, diagnosis quality, restraint
   breakeven.py    the honest result and what it costs
+  freetext_eval.py the one LLM-vs-rules comparison that isn't confounded
   audit.py        append-only decision log
   report.py       self-contained HTML
 tests/
@@ -367,9 +369,10 @@ tests/
 ```
 
 ```bash
-make demo         # full benchmark + HTML report
-make test         # 27 tests
-make ablation     # does the LLM earn its place?
-make sensitivity  # does the conclusion survive a shaken table?
-make audit        # sample audit entries, including refusals
+make demo               # full benchmark + HTML report
+make test               # 27 tests
+make ablation LLM=1     # does the LLM earn its place on root cause?
+make freetext LLM=1     # ...and on customer prose, where the rules can't cheat
+make sensitivity        # does the conclusion survive a shaken table?
+make audit              # sample audit entries, including refusals
 ```
